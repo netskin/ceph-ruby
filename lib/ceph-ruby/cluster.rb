@@ -4,7 +4,6 @@ module CephRuby
 
     def initialize(options = {})
       options[:config_path] ||= "/etc/ceph/ceph.conf"
-      options[:username] ||= nil
 
       log("init lib rados #{Lib::Rados.version_string}, lib rbd #{Lib::Rbd.version_string}")
 
