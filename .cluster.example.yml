@@ -1,0 +1,19 @@
+---
+:cluster: ceph
+:config_dir: "/etc/ceph"
+:user: client.admin
+:flags: 0
+:readable: true # User has +r mon cap
+:writable: true # User has +w mon cap
+:pool:
+   :name: rspec_test
+   :create_delete: true # Means you can run create and delete on this pool {beware of dragons!}
+                        # If you accidentally set this and you have a pool with the same name it will 
+                        # delete it at the end of the rspec test!
+                        # This only works if the user has +w mon cap
+   :rule_id: 0  # Crush Ruleset id to determine where to place pools
+   :writable: true # Means this pool has read/write permissions {beware of dragons!}
+                   # If you accidentally set this to true and you have objects in your pool
+                   # that you want to keep with name = object_name, it will overwrite and then delete them!
+                   # this only works if the user has +w osd cap at least on pool[:name]
+   :object_name: rspec_test_object

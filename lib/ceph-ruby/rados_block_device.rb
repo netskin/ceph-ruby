@@ -1,32 +1,29 @@
 module CephRuby
+  # Rados Block Device
   class RadosBlockDevice
+    extend CephRuby::RadosBlockDeviceHelper
     attr_accessor :pool, :name, :handle
 
-    delegate :cluster, :to => :pool
+    delegate :cluster, to: :pool
 
     def initialize(pool, name)
       self.pool = pool
       self.name = name
       if block_given?
-        yield(self)
-        close
+        begin
+          yield(self)
+        ensure
+          close
+        end
       end
     end
 
     def exists?
-      log("exists?")
-      handle_p = FFI::MemoryPointer.new(:pointer)
-      ret = Lib::Rbd.rbd_open(pool.handle, name, handle_p, nil)
-      case ret
-      when 0
-        handle = handle_p.get_pointer(0)
-        Lib::Rbd.rbd_close(handle)
-        true
-      when -Errno::ENOENT::Errno
-        false
-      else
-        raise SystemCallError.new("open of '#{name}' failed", -ret) if ret < 0
-      end
+      log('exists?')
+      RadosBlockDevice.close_handle(open_handle)
+    rescue SystemCallError => e
+      return false if e.errno == -Errno::ENOENT::Errno
+      raise
     end
 
     def create(size, features = 0, order = 26)
@@ -39,23 +36,27 @@ module CephRuby
 
     def open
       return if open?
-      log("open")
+      log('open')
+      self.handle = open_handle
+    end
+
+    def open_handle
       handle_p = FFI::MemoryPointer.new(:pointer)
       ret = Lib::Rbd.rbd_open(pool.handle, name, handle_p, nil)
       raise SystemCallError.new("open of '#{name}' failed", -ret) if ret < 0
-      self.handle = handle_p.get_pointer(0)
+      handle_p.get_pointer(0)
     end
 
     def close
       return unless open?
-      log("close")
-      Lib::Rbd.rbd_close(handle)
+      log('close')
+      RadosBlockDevice.close_handle(handle)
       self.handle = nil
     end
 
     def destroy
       close if open?
-      log("destroy")
+      log('destroy')
       ret = Lib::Rbd.rbd_remove(pool.handle, name)
       raise SystemCallError.new("destroy of '#{name}' failed", -ret) if ret < 0
     end
@@ -65,8 +66,10 @@ module CephRuby
       size = data.bytesize
       log("write offset #{offset}, size #{size}")
       ret = Lib::Rbd.rbd_write(handle, offset, size, data)
-      raise SystemCallError.new("write of #{size} bytes to '#{name}' at #{offset} failed", -ret) if ret < 0
-      raise Errno::EIO.new("wrote only #{ret} of #{size} bytes to '#{name}' at #{offset}") if ret < size
+      raise SystemCallError.new("write of #{size} bytes to '#{name}' "\
+                                "at #{offset} failed", -ret) if ret < 0
+      raise Errno::EIO, "wrote only #{ret} of #{size} bytes to "\
+                           "'#{name}' at #{offset}" if ret < size
     end
 
     def read(offset, size)
@@ -74,26 +77,27 @@ module CephRuby
       log("read offset #{offset}, size #{size}")
       data_p = FFI::MemoryPointer.new(:char, size)
       ret = Lib::Rbd.rbd_read(handle, offset, size, data_p)
-      raise SystemCallError.new("read of #{size} bytes from '#{name}' at #{offset} failed", -ret) if ret < 0
+      raise SystemCallError.new("read of #{size} bytes from "\
+                                "'#{name}' at #{offset} failed",
+                                -ret) if ret < 0
       data_p.get_bytes(0, ret)
     end
 
     def stat
       ensure_open
-      log("stat")
+      log('stat')
       stat = Lib::Rbd::StatStruct.new
       ret = Lib::Rbd.rbd_stat(handle, stat, stat.size)
       raise SystemCallError.new("stat of '#{name}' failed", -ret) if ret < 0
-      Hash[[:size, :obj_size, :num_objs, :order].map{ |k| [k, stat[k]] }].tap do |hash|
-        hash[:block_name_prefix] = stat[:block_name_prefix].to_ptr.read_string
-      end
+      RadosBlockDevice.parse_stat(stat)
     end
 
     def resize(size)
       ensure_open
       log("resize size #{size}")
       ret = Lib::Rbd.rbd_resize(handle, size)
-      raise SystemCallError.new("resize of '#{name}' to #{size} failed", -ret) if ret < 0
+      raise SystemCallError.new("resize of '#{name}' to #{size} failed",
+                                -ret) if ret < 0
     end
 
     def size
@@ -102,31 +106,13 @@ module CephRuby
 
     def copy_to(dst_name, dst_pool = nil)
       ensure_open
-      case dst_pool
-      when String
-        dst_pool = cluster.pool(dst_pool)
-      when nil
-        dst_pool = pool
-      end
-      dst_pool.ensure_open
-      log("copy_to #{dst_pool.name}/#{dst_name}")
+      dst_pool = parse_dst(dst, pool)
+      dst_pool_name = dst_pool.name
+      log("copy_to #{dst_pool_name}/#{dst_name}")
       ret = Lib::Rbd.rbd_copy(handle, dst_pool.handle, dst_name)
-      raise SystemCallError.new("copy of '#{name}' to '#{dst_pool.name}/#{dst_name}' failed", -ret) if ret < 0
-    end
-
-    # helper methods below
-
-    def open?
-      !!handle
-    end
-
-    def ensure_open
-      return if open?
-      open
-    end
-
-    def log(message)
-      CephRuby.log("rbd image #{pool.name}/#{name} #{message}")
+      raise SystemCallError.new("copy of '#{name}' to "\
+                                "'#{dst_pool_name}/#{dst_name}' failed",
+                                -ret) if ret < 0
     end
   end
 end
